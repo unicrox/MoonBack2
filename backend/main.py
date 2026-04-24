@@ -7,7 +7,7 @@ import sys
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse, PlainTextResponse, Response
+from fastapi.responses import JSONResponse, Response
 import uvicorn
 
 
@@ -185,9 +185,14 @@ def hello() -> SuccessResponse:
     return SuccessResponse(message="Welcome!")
 
 
-@app.api_route("/ping", methods=["GET", "POST"], response_class=PlainTextResponse)
-async def ping() -> PlainTextResponse:
-    return PlainTextResponse("pong")
+@app.api_route(
+    "/ping",
+    methods=["GET"],
+    response_model=SuccessResponse,
+    responses=SERVER_ERROR_RESPONSE,
+)
+async def ping() -> SuccessResponse:
+    return SuccessResponse(message="pong")
 
 
 def _runtime_base_dir() -> Path:

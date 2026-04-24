@@ -1,28 +1,36 @@
 import { Button, Card, Chip } from "@heroui/react";
 import { useCallback, useEffect, useState } from "react";
-
-const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? "http://127.0.0.1:8200";
+import {
+  API_BASE_URL,
+  apiRequest,
+  getFrontendConsts,
+  getFrontendConstsHash,
+} from "../lib/api";
 
 type ConnectionStatus = "checking" | "online" | "offline";
+type FrontendConsts = ReturnType<typeof getFrontendConsts>;
 
 export default function DevPage() {
   const [status, setStatus] = useState<ConnectionStatus>("checking");
   const [message, setMessage] = useState("Checking backend connection...");
+  const [constHash, setConstHash] = useState<string | null>(getFrontendConstsHash);
+  const [frontendConsts, setFrontendConsts] = useState<FrontendConsts>(getFrontendConsts);
 
   const checkBackendConnection = useCallback(async () => {
     setStatus("checking");
     setMessage("Checking backend connection...");
 
     try {
-      const response = await fetch(`${API_BASE_URL}/ping`);
-      const text = await response.text();
+      const response = await apiRequest("/ping");
 
-      if (!response.ok || text !== "pong") {
-        throw new Error(`Unexpected response: ${response.status} ${text}`);
+      if (response.message !== "pong") {
+        throw new Error(`Unexpected response: ${response.message ?? "No message"}`);
       }
 
+      setConstHash(getFrontendConstsHash());
+      setFrontendConsts(getFrontendConsts());
       setStatus("online");
-      setMessage("Backend is online.");
+      setMessage("Backend is online. Frontend constants are up to date.");
     } catch (error) {
       setStatus("offline");
       setMessage(error instanceof Error ? error.message : "Backend is offline.");
@@ -44,10 +52,11 @@ export default function DevPage() {
     online: "success",
     offline: "danger",
   }[status] as "warning" | "success" | "danger";
+  const hasFrontendConsts = Object.keys(frontendConsts).length > 0;
 
   return (
     <main className="flex min-h-screen flex-1 items-center justify-center p-6">
-      <Card className="w-full max-w-xl">
+      <Card className="w-full max-w-2xl">
         <Card.Header>
           <div className="flex w-full flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
             <div>
@@ -61,7 +70,18 @@ export default function DevPage() {
         </Card.Header>
         <Card.Content>
           <p className="mb-6">{message}</p>
-          <code>{API_BASE_URL}/ping</code>
+          <div className="mb-6 flex flex-col gap-2">
+            <code>{API_BASE_URL}/ping</code>
+            <code>const hash: {constHash ?? "not loaded"}</code>
+          </div>
+          <div>
+            <p className="mb-2 text-sm font-medium">Latest constants</p>
+            <pre className="max-h-72 overflow-auto rounded-lg bg-default p-4 text-left text-sm">
+              {hasFrontendConsts
+                ? JSON.stringify(frontendConsts, null, 2)
+                : "No constants loaded yet."}
+            </pre>
+          </div>
         </Card.Content>
         <Card.Footer>
           <Button
