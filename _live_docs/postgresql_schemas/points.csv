@@ -1,0 +1,6 @@
+column_name,data_type,is_nullable,column_default,is_primary_key
+point_id,bigint,NO,,YES
+point_type,text,NO,,NO
+assumption,text,NO,''::text,NO
+raw_data,jsonb,NO,'{}'::jsonb,NO
+conclusion,text,NO,''::text,NO

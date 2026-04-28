@@ -1,0 +1,12 @@
+services:
+  db:
+    image: postgres
+    container_name: local-postgres
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: xxs2IrVwlgrb5My2U
+      POSTGRES_DB: moonback2
+    ports:
+      - "5432:5432"
+    volumes:
+      - ../../archives/postgresql:/var/lib/postgresql

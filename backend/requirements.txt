@@ -1,3 +1,6 @@
 fastapi
 langchain
+langgraph
+psycopg2-binary
 uvicorn[standard]
+volcengine-python-sdk[ark]

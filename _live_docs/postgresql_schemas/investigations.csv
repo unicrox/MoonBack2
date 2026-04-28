@@ -1,0 +1,3 @@
+column_name,data_type,is_nullable,column_default,is_primary_key
+investigation_id,bigint,NO,,YES
+investigation_name,text,NO,''::text,NO

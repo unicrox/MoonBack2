@@ -1,42 +1,38 @@
 
 from enum import StrEnum
-import uuid
+from functools import lru_cache, partial
+from typing import Any
 import json
 from fastapi import APIRouter, HTTPException
-from matplotlib.pylab import Any
-from core.response_helper import COMMON_ERROR_RESPONSES
+from helpers.response_helper import COMMON_ERROR_RESPONSES
 from fastapi.responses import StreamingResponse
 from schemas.response_schemas import ResponseCode
 from pydantic import BaseModel, Field
 from langchain_core.messages import HumanMessage
+from repositories.postgresql_repository import PostgreSQLRepository
+from ai.ark_model import ArkChatModel
+from langgraph.graph import StateGraph, START, END
+
 
 
 router = APIRouter(prefix="/agent/v2", tags=["agent_v2"])
+_INVESTIGATIONS_TABLE = "investigations"
+_POINTS_TABLE = "points"
 
 
 ## Schemas --------------------------------
 
-class ChangePointRequest(BaseModel):
+class PointRequestCtx(BaseModel):
     investigation_id: int | None = Field(default=None, description="The ID of the investigation to which this message belongs. If not provided, a new investigation will be created.", examples=["investigation-uuid-xxx"])
     point_id: int | None = Field(default=None, description="The ID of the point to change. If not provided, the message will be treated as a new point.", examples=["point-uuid-xxx"])
-    new_question: str | None = Field(default=None, description="The new question content to update the point with. If not provided, the point's question will remain unchanged.", examples=["What is the weather like today?"])
-    token: str | None = Field(default=None, description="Auth token forwarded to the business server API.", examples=["lighting-designer-token-xxx"])
+    assumption: str = Field(description="The new assumption content to update the point with.", examples=["What is the weather like today?"])
+    token: str = Field(description="Auth token forwarded to the business server API.", examples=["lighting-designer-token-xxx"])
 
 
 class InvestigateAgentState(BaseModel):
     messages: list[HumanMessage] = Field(default_factory=list, description="The current list of messages in the conversation.")
     is_thinking: bool = Field(default=True, description="Whether the agent is currently processing/thinking.")
     error: str = Field(default="", description="Any error message if an error occurred during processing.")
-    chat_id: str = Field(default_factory=lambda: str(uuid.uuid4()), description="Unique identifier for the chat session.")
-    token: str = Field(default="", description="Auth token forwarded to the business server API.")
-    order_search_count: int = Field(default=0, description="Number of times order search has been performed in this conversation.")
-    order_search_history: list[dict[str, Any]] = Field(default_factory=list, description="History of order search queries and results.")
-
-
-class DeltaPoint(BaseModel):
-    action: DeltaPointAction = Field(description="The type of change to apply to the point.")
-    question: str | None = Field(default=None, description="The updated question content for this point.")
-    reply: str | None = Field(default=None, description="The updated reply content for this point.")
 
 
 class DeltaPointAction(StrEnum):
@@ -45,35 +41,85 @@ class DeltaPointAction(StrEnum):
     UPDATE = "update"
     DELETE = "delete"
 
+
+class DeltaPoint(BaseModel):
+    action: DeltaPointAction = Field(description="The type of change to apply to the point.")
+    question: str | None = Field(default=None, description="The updated question content for this point.")
+    reply: str | None = Field(default=None, description="The updated reply content for this point.")
+
+
+class AgentV2RouteAction(StrEnum):
+    SEARCH_ORDERS = "search_orders"
+    CONCLUSION = "conclusion"
+
+
 ## Endpoints --------------------------------
 
 @router.post(
     "/change_point",
     responses=COMMON_ERROR_RESPONSES,
 )
-async def change_point(message: ChangePointRequest) -> StreamingResponse:
+async def change_point(ctx: PointRequestCtx) -> StreamingResponse:
+    # - process input -
+    def _auto_complete_investigation_id(
+        repository: PostgreSQLRepository,
+        investigation_id: int | None,
+    ) -> int:
+        if investigation_id is not None:
+            return investigation_id
+
+        rows = repository.create(_INVESTIGATIONS_TABLE, returning="id")
+        if not rows or not isinstance(rows, list) or rows[0].get("id") is None:
+            raise HTTPException(status_code=500, detail="Failed to create investigation.")
+        return int(rows[0]["id"])
+
+    def _auto_complete_point_id(
+        repository: PostgreSQLRepository,
+        point_id: int | None,
+        investigation_id: int,
+    ) -> int:
+        if point_id is not None:
+            return point_id
+
+        rows = repository.create(
+            _POINTS_TABLE,
+            {"investigation_id": investigation_id},
+            returning="id",
+        )
+        if not rows or not isinstance(rows, list) or rows[0].get("id") is None:
+            raise HTTPException(status_code=500, detail="Failed to create point.")
+        return int(rows[0]["id"])
+
+    with PostgreSQLRepository() as repository:
+        investigation_id = _auto_complete_investigation_id(
+            repository,
+            ctx.investigation_id,
+        )
+        if investigation_id is None: point_id = None
+        point_id = _auto_complete_point_id(
+            repository,
+            ctx.point_id,
+            investigation_id,
+        )
+
+    assumption = ctx.assumption.strip() if ctx.assumption else ""
+    if not assumption:
+        raise HTTPException(status_code=400, detail="assumption must not be empty.")
+
+    token = ctx.token.strip() if ctx.token else ""
+    if not token:        
+        raise HTTPException(status_code=400, detail="token must not be empty.")
+
+    # - business logic -
     async def event_stream():
-        normalized_message = message.new_question.strip() if message.new_question else ""
-        if not normalized_message:
-            raise HTTPException(status_code=400, detail="new_question must not be empty.")
-        
-        def _get_or_create_chat_id(chat_id: str | None) -> str:
-            """Get chat_id from request or generate a new UUID if not provided."""
-            if not chat_id or not str(chat_id).strip():
-                return str(uuid.uuid4())
-            return str(chat_id).strip()
 
         initial_state: InvestigateAgentState = {
-            "messages": [HumanMessage(content=normalized_message)],
+            "messages": [HumanMessage(content=assumption)],
             "is_thinking": True,
             "error": "",
-            "chat_id": _get_or_create_chat_id(message.chat_id),
-            "token": str(message.token or "").strip(),
-            "order_search_count": 0,
-            "order_search_history": [],
         }
 
-        graph = build_agent_v2_graph()
+        graph = build_investigation_graph()
         yield ("agent_state", state_to_response(initial_state))
         try:
             async for chunk in graph.astream(
@@ -113,10 +159,10 @@ async def get_investigation(investigation_id: int) -> dict[str, Any]:
 ## LLM Graph --------------------------------
 
 @lru_cache(maxsize=1)
-def build_agent_v2_graph():
+def build_investigation_graph():
     llm = ArkChatModel()
 
-    graph = StateGraph(AgentV2State)
+    graph = StateGraph(InvestigateAgentState)
     graph.add_node("route_node", partial(route_node, llm=llm))
     graph.add_node("order_search_node", partial(order_search_node, llm=llm))
     graph.add_node("reply_node", partial(reply_node, llm=llm))
@@ -143,6 +189,30 @@ def _route_after_route(state: AgentV2State) -> str:
     return "reply_node"
 
 
+#### Nodes --------------------------------
+
+
+async def route_node(state: InvestigateAgentState, llm: ArkChatModel) -> dict:
+    user_message = _get_latest_user_message(state)
+    route_context = 
+
+    try:
+        decision = llm.parse(
+            messages=[
+                {"role": "system", "content": _ROUTE_PROMPT},
+                {"role": "user", "content": route_context},
+            ],
+            response_format=AgentV2RouteDecision,
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to route agent v2: {exc}") from exc
+
+    if decision is None or not decision.reason.strip():
+        raise HTTPException(status_code=500, detail="Agent v2 route decision is empty.")
+
+    return {"route_decision": decision, "is_thinking": True}
+
+
 ## Helper functions --------------------------------
 
 def state_to_response(state: AgentV2State | None) -> AgentV2MessageResponse:
@@ -158,3 +228,16 @@ def state_to_response(state: AgentV2State | None) -> AgentV2MessageResponse:
         is_thinking=bool((state or {}).get("is_thinking")),
         reply=reply,
     )
+
+def _get_latest_user_message(state: InvestigateAgentState) -> str:
+    messages = state.get("messages") or []
+    if not messages:
+        raise HTTPException(status_code=400, detail="agent state must include at least one message.")
+
+    for state_message in reversed(messages):
+        if isinstance(state_message, HumanMessage):
+            content = str(state_message.content).strip()
+            if content:
+                return content
+
+    raise HTTPException(status_code=400, detail="agent state must include a non-empty user message.")

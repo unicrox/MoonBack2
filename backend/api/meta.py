@@ -1,7 +1,7 @@
 from fastapi import APIRouter
 
 from schemas.response_schemas import SuccessResponse
-from core.response_helper import RESPONSE_CODE_MEANINGS, SERVER_ERROR_RESPONSE
+from helpers.response_helper import RESPONSE_CODE_MEANINGS, SERVER_ERROR_RESPONSE
 
 router = APIRouter(prefix="/meta", tags=["meta"])
 
