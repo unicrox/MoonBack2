@@ -30,6 +30,7 @@ __pycache__/
 .ruff_cache/
 .venv/
 venv/
+secrets.py
 
 # Node / frontend
 node_modules/

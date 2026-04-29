@@ -1,0 +1,1 @@
+python3 backend/scripts/update_postgresql_schemas.py

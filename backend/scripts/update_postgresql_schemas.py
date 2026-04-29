@@ -10,8 +10,9 @@ from pathlib import Path
 
 ROOT_DIR = Path(__file__).resolve().parents[2]
 BACKEND_DIR = ROOT_DIR / "backend"
-OUTPUT_DIR = ROOT_DIR / "_live_docs" / "postgresql_schemas"
+OUTPUT_DIR = BACKEND_DIR / "schemas" / "pg"
 
+sys.path.insert(0, str(ROOT_DIR))
 sys.path.insert(0, str(BACKEND_DIR))
 
 import config  # noqa: E402
