@@ -14,6 +14,7 @@ def response_code_from_http(http_status: int) -> ResponseCode:
     if http_status >= 400:
         return ResponseCode.ERROR
     return ResponseCode.OK
+
 class CustomException(HTTPException):
     def __init__(
         self,

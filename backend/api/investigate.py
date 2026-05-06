@@ -2,11 +2,12 @@
 from enum import StrEnum
 from functools import lru_cache, partial
 from typing import Any
+import asyncio
 import json
 from fastapi import APIRouter, HTTPException
 from helpers.response_helper import COMMON_ERROR_RESPONSES
 from fastapi.responses import StreamingResponse
-from schemas.response_schemas import ResponseCode
+from schemas.response_schemas import ResponseCode, SuccessResponse
 from pydantic import BaseModel, Field
 from repositories.postgresql_repository import PostgreSQLRepository
 from ai.ark_model import ArkChatModel
@@ -34,10 +35,8 @@ class SetPointRequest(BaseModel):
     assumption: str = Field(description="The new assumption content to update the point with.", examples=["What is the weather like today?"])
     conclusion: str = Field(description="The conclusion content to update the point with.", examples=["The assumption is supported by the available order data."])
 
-class MakeConclusionRequest(BaseModel):
-    investigation_id: int | None = Field(default=None, description="The ID of the investigation to which this message belongs. If not provided, a new investigation will be created.", examples=["investigation-uuid-xxx"])
+class ProcessPointRequest(BaseModel):
     point_id: int | None = Field(default=None, description="The ID of the point to change. If not provided, the message will be treated as a new point.", examples=["point-uuid-xxx"])
-    assumption: str = Field(description="The new assumption content to update the point with.", examples=["What is the weather like today?"])
     token: str = Field(description="Auth token forwarded to the business server API.", examples=["lighting-designer-token-xxx"])
 
 
@@ -55,9 +54,16 @@ class DeltaPoint(BaseModel):
 
 
 class InvestigateRouteAction(StrEnum):
-    SEARCH_ORDERS = "search_orders"
+    MORE_INVESTIGATIONS = "more_investigations"
     CONCLUSION = "conclusion"
 
+class PointType(StrEnum):
+    TRUNK = "trunk"
+    SEARCH_ORDERS = "search_orders"
+
+class SelectPointTypeDecision(BaseModel):
+    point_type: PointType = Field(..., description="The concrete point type to create for the next investigation step.")
+    reason: str = Field(..., description="A brief user-safe reason for the selected point type.")
 
 class InvestigateRouteDecision(BaseModel):
     action: InvestigateRouteAction = Field(..., description="Whether the agent should search order data again or proceed to final reply.")
@@ -65,7 +71,7 @@ class InvestigateRouteDecision(BaseModel):
     reason: str = Field(..., description="A brief user-safe rationale for this routing decision. Do not include hidden reasoning.")
 
 
-class InvestigateAgentState(BaseModel):
+class AgentState(BaseModel):
     assumption: str = Field(description="The assumption content from the point table.")
     is_thinking: bool = Field(default=True, description="Whether the agent is currently processing/thinking.")
     error: str = Field(default="", description="Any error message if an error occurred during processing.")
@@ -73,6 +79,8 @@ class InvestigateAgentState(BaseModel):
     current_investigation: PgInvestigations | None = Field(default=None, description="The latest investigation state from the database.")
     current_point: PgPoints | None = Field(default=None, description="The latest point state from the database.")
 
+class LeaveState(BaseModel):
+    pass
 
 ## Endpoints --------------------------------
 
@@ -91,161 +99,128 @@ async def set_point(req: SetPointRequest):
     pass
 
 @router.post(
-    "/make_conclusion",
+    "/process_point_endpoint",
+    response_model=SuccessResponse,
     responses=COMMON_ERROR_RESPONSES,
 )
-async def make_conclusion(req: MakeConclusionRequest) -> StreamingResponse:
+async def process_point_endpoint(req: ProcessPointRequest) -> SuccessResponse:
     # - process input -
-    def _auto_complete_investigation(
-        repository: PostgreSQLRepository,
-        investigation_id: int | None,
-    ) -> PgInvestigations:
-        if investigation_id is not None:
-            rows = repository.read(
-                _INVESTIGATIONS_TABLE,
-                where="investigation_id = %s",
-                params=(investigation_id,),
-                limit=1,
+    asyncio.create_task(process_point(req.point_id))
+    return SuccessResponse(message="Point processing scheduled.")
+
+
+async def process_point(point_id: int | None):
+    with PostgreSQLRepository() as repository:
+        if point_id is None:
+            investigation_rows = repository.create(_INVESTIGATIONS_TABLE, returning="*")
+            if not investigation_rows or not isinstance(investigation_rows, list):
+                raise HTTPException(status_code=500, detail="Failed to create investigation.")
+
+            current_investigation = PgInvestigations.model_validate(investigation_rows[0])
+            point_rows = repository.create(
+                _POINTS_TABLE,
+                {
+                    "investigation_id": current_investigation.investigation_id,
+                    "point_type": PointType.TRUNK,
+                },
+                returning="*",
             )
-            if rows:
-                return PgInvestigations.model_validate(rows[0])
+            if not point_rows or not isinstance(point_rows, list):
+                raise HTTPException(status_code=500, detail="Failed to create point.")
 
-        rows = repository.create(_INVESTIGATIONS_TABLE, returning="*")
-        if not rows or not isinstance(rows, list):
-            raise HTTPException(status_code=500, detail="Failed to create investigation.")
-        return PgInvestigations.model_validate(rows[0])
-
-    def _auto_complete_point(
-        repository: PostgreSQLRepository,
-        point_id: int | None,
-        investigation_id: int,
-    ) -> PgPoints:
-        if point_id is not None:
-            rows = repository.read(
+            current_point = PgPoints.model_validate(point_rows[0])
+        else:
+            point_rows = repository.read(
                 _POINTS_TABLE,
                 where="point_id = %s",
                 params=(point_id,),
                 limit=1,
             )
-            if rows:
-                return PgPoints.model_validate(rows[0])
+            if not point_rows:
+                raise HTTPException(status_code=404, detail="Point not found.")
 
-        rows = repository.create(
-            _POINTS_TABLE,
-            {"investigation_id": investigation_id},
-            returning="*",
-        )
-        if not rows or not isinstance(rows, list):
-            raise HTTPException(status_code=500, detail="Failed to create point.")
-        return PgPoints.model_validate(rows[0])
+            investigation_id = point_rows[0].get("investigation_id")
+            if investigation_id is None:
+                raise HTTPException(status_code=500, detail="Point is missing investigation_id.")
 
-    with PostgreSQLRepository() as repository:
-        current_investigation = _auto_complete_investigation(
-            repository,
-            req.investigation_id,
-        )
-        current_point = _auto_complete_point(
-            repository,
-            req.point_id,
-            current_investigation.investigation_id,
-        )
+            investigation_rows = repository.read(
+                _INVESTIGATIONS_TABLE,
+                where="investigation_id = %s",
+                params=(investigation_id,),
+                limit=1,
+            )
+            if not investigation_rows:
+                raise HTTPException(status_code=404, detail="Investigation not found.")
 
-    assumption = req.assumption.strip() if req.assumption else ""
-    if not assumption:
-        raise HTTPException(status_code=400, detail="assumption must not be empty.")
+            current_investigation = PgInvestigations.model_validate(investigation_rows[0])
+            current_point = PgPoints.model_validate(point_rows[0])
 
-    token = req.token.strip() if req.token else ""
-    if not token:        
-        raise HTTPException(status_code=400, detail="token must not be empty.")
-
-    initial_state = InvestigateAgentState(
-            assumption=assumption,
-            is_thinking=True,
-            error="",
-            current_investigation=current_investigation,
-            current_point=current_point,
+    agent_state = AgentState(
+        assumption=current_point.assumption,
+        is_thinking=True,
+        error="",
+        current_investigation=current_investigation,
+        current_point=current_point,
     )
 
-    # - business logic -
-    async def event_stream():
-        graph = build_investigation_graph()
-        yield ("agent_state", state_to_response(initial_state))
-        try:
-            async for chunk in graph.astream(
-                initial_state,
-                stream_mode="updates",
-            ):
-                node_name, update = next(iter(chunk.items()))
-                yield (node_name, state_to_response(update))
-        except Exception as exc:
-            yield (
-                "error",
-                DeltaPoint(
-                    code=ResponseCode.ERROR,
-                    error=str(exc),
-                    is_thinking=False,
-                    reply=None,
-                ),
-            )
-
-        async for event_name, chunk in stream_chat_to_agent_v2(message):
-            yield (
-                f"event: {event_name}\n"
-                f"data: {json.dumps(chunk.model_dump(), ensure_ascii=False)}\n\n"
-            )
-
-    return StreamingResponse(event_stream(), media_type="text/event-stream")
-
+    if current_point.point_type == PointType.TRUNK:
+        asyncio.create_task(trunk_graph().ainvoke(agent_state.model_dump()))
+        return True, None
+    elif current_point.point_type == PointType.SEARCH_ORDERS:
+        asyncio.create_task(leave_graph().ainvoke(agent_state.model_dump()))
+        return True, None
+    
+    raise HTTPException(status_code=500, detail=f"Unknown point type: {current_point.point_type}")
 
 ## LLM Graph --------------------------------
 
 @lru_cache(maxsize=1)
-def build_investigation_graph():
+def trunk_graph():
     llm = ArkChatModel()
 
-    graph = StateGraph(InvestigateAgentState)
+    graph = StateGraph(AgentState)
     graph.add_node("route_node", partial(route_node, llm=llm))
+    graph.add_node("leaf_process_node", partial(leaf_process_node, llm=llm))
     graph.add_node("order_search_node", partial(order_search_node, llm=llm))
     graph.add_node("conclusion_node", partial(conclusion_node, llm=llm))
 
     graph.add_edge(START, "route_node")
     graph.add_conditional_edges(
         "route_node",
-        _route_after_route,
-        {"order_search_node": "order_search_node", "conclusion_node": "conclusion_node"},
+        _trunk_route,
+        {"more_investigations_node": "leaf_process_node", "conclusion_node": "conclusion_node"},
     )
-    graph.add_edge("order_search_node", "route_node")
+    graph.add_edge("leaf_process_node", "route_node")
     graph.add_edge("conclusion_node", END)
 
     return graph.compile()
 
-def _route_after_route(state: InvestigateAgentState) -> str:
+def _trunk_route(state: AgentState) -> str:
     decision = state.get("route_decision")
-    if (
-        decision
-        and decision.action == InvestigateRouteAction.SEARCH_ORDERS
-        and state.get("order_search_count", 0) < _MAX_ORDER_SEARCHES
-    ):
-        return "order_search_node"
+    if decision and decision.action == InvestigateRouteAction.MORE_INVESTIGATIONS:
+        return "more_investigations_node"
     return "conclusion_node"
 
+
+def leave_graph():
+    pass
 
 #### Nodes --------------------------------
 
 
-async def route_node(state: InvestigateAgentState, llm: ArkChatModel) -> dict:
+async def route_node(state: AgentState, llm: ArkChatModel) -> dict:
     assumption = state["assumption"]
     _ROUTE_INSTRUCTION = (
         "你是一个调查助手的路由决策器，只负责判断下一步应该执行哪类动作。\n\n"
         "可选动作：\n"
-        "1. search_orders：当用户的假设、问题或待验证内容需要查询订单/业务数据后才能判断时选择。\n"
+        "1. more_investigations：当用户的假设、问题或待验证内容需要进一步调查后才能判断时选择。\n"
         "2. conclusion：当用户输入已经足够生成结论、回复或澄清，不需要再查询订单数据时选择。\n\n"
         "判断规则：\n"
-        "- 如果需要订单列表、订单详情、客户购买记录、交付状态、金额、时间、商品、服务记录等业务数据来验证或回答，选择 search_orders。\n"
+        "- 如果需要订单列表、订单详情、客户购买记录、交付状态、金额、时间、商品、服务记录等业务数据来验证或回答，选择 more_investigations。\n"
         "- 如果用户只是表达假设、要求总结、要求解释、信息不足且无法通过订单查询直接补全，选择 conclusion。\n"
-        "- 不要编造订单信息；无法确定但可能依赖订单事实时，优先选择 search_orders。\n"
+        "- 不要编造订单信息；无法确定但可能依赖订单事实时，优先选择 more_investigations。\n"
         "- instruction 必须给出下一步代理应该执行的具体任务，且要和 action 匹配。\n"
-        "- 当 action 为 search_orders 时，instruction 应说明要查什么订单数据，例如查询今年订单、统计订单数量、检查客户购买记录等。\n"
+        "- 当 action 为 more_investigations 时，instruction 应说明要调查什么数据，例如查询今年订单、统计订单数量、检查客户购买记录等。\n"
         "- 当 action 为 conclusion 时，instruction 应说明如何基于现有信息回复或总结。\n"
         "- reason 必须使用简洁中文说明决策原因。"
     )
@@ -271,7 +246,15 @@ async def route_node(state: InvestigateAgentState, llm: ArkChatModel) -> dict:
     return {"route_decision": decision, "is_thinking": True}
 
 
-async def order_search_node(state: InvestigateAgentState, llm: ArkChatModel) -> dict:
+async def leaf_process_node(state: AgentState, llm: ArkChatModel) -> dict:
+    pass
+
+
+async def conclusion_node(state: AgentState, llm: ArkChatModel) -> dict:
+    return {"is_thinking": False}
+
+
+async def order_search_node(state: AgentState, llm: ArkChatModel) -> dict:
     assumption = state["assumption"]
     decision = state.get("route_decision")
     if decision is None:
@@ -305,14 +288,3 @@ async def order_search_node(state: InvestigateAgentState, llm: ArkChatModel) -> 
         "error": error or "",
         "is_thinking": True,
     }
-
-
-## Helper functions --------------------------------
-
-def state_to_response(state: AgentV2State | None) -> AgentV2MessageResponse:
-    return AgentV2MessageResponse(
-        code=ResponseCode.OK,
-        error=(state or {}).get("error") or None,
-        is_thinking=bool((state or {}).get("is_thinking")),
-        reply=None,
-    )
