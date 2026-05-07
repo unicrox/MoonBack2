@@ -1,7 +1,7 @@
 # Basic
 from pathlib import Path
 
-from backend import app_secrets
+import app_secrets
 
 
 BACKEND_DIR = Path(__file__).resolve().parent

@@ -9,7 +9,7 @@ from urllib.request import Request, urlopen
 
 from pydantic import BaseModel, Field
 
-import config
+import app_secrets
 
 
 _TOOL_DIR = Path(__file__).resolve().parent
@@ -98,14 +98,12 @@ async def call_jinxi_order_get_api(
     request: JinxiOrderGetRequest,
     *,
     url: str = JINXI_ORDER_GET_URL,
-    token: str | None = None,
     timeout: float = 30.0,
 ) -> tuple[dict[str, Any], str, str | None]:
     return await asyncio.to_thread(
         _call_jinxi_order_get_api_sync,
         request,
         url=url,
-        token=token,
         timeout=timeout,
     )
 
@@ -114,7 +112,6 @@ def _call_jinxi_order_get_api_sync(
     request: JinxiOrderGetRequest,
     *,
     url: str,
-    token: str | None,
     timeout: float,
 ) -> tuple[dict[str, Any], str, str | None]:
     payload = request.to_payload()
@@ -122,7 +119,7 @@ def _call_jinxi_order_get_api_sync(
     headers = {
         "Content-Type": "application/json",
         "Accept": "application/json",
-        "token": token or config.JINXI_SERVER_TMP_TOKEN,
+        "token": app_secrets.JINXI_SERVER_TMP_TOKEN,
     }
     http_request = Request(
         url,

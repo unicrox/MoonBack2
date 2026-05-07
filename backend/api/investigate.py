@@ -50,7 +50,6 @@ class SetPointRequest(BaseModel):
 
 class ProcessPointRequest(BaseModel):
     point_id: int | None = Field(default=None, description="The ID of the point to change. If not provided, the message will be treated as a new point.", examples=["point-uuid-xxx"])
-    token: str = Field(description="Auth token forwarded to the business server API.", examples=["lighting-designer-token-xxx"])
 
 
 class DeltaPointAction(StrEnum):
