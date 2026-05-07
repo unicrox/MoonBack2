@@ -7,6 +7,15 @@ import app_secrets
 BACKEND_DIR = Path(__file__).resolve().parent
 ARCHIVES_DIR = BACKEND_DIR / "archives"
 
+DOUBAO_BASE_URL = "https://ark.cn-beijing.volces.com/api/v3"
+DOUBAO_API_KEY_NAME = "api-key-20260302162224"
+DOUBAO_API_KEY = "83e0abdf-fd5d-4907-84c8-9955fa2df31f"
+DOUBAO_CHAT_MODEL = "doubao-seed-2-0-lite-260215"
+DOUBAO_FINAL_REPORT_THINKING = {"type": "enabled"}
+DOUBAO_USEFUL_EVIDENCE_SELECTION_THINKING = {"type": "disabled"}
+DOUBAO_EMBEDDING_MODEL = "doubao-embedding-vision-251215"
+DOUBAO_EMBEDDING_TARGET_MODALITY = "text"
+
 # Local PostgreSQL configuration
 POSTGRES_CONTAINER_NAME = "local-postgres"
 POSTGRES_HOST = "localhost"

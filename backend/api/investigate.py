@@ -102,10 +102,57 @@ class AgentState(BaseModel):
 ## Endpoints --------------------------------
 
 @router.get(
-    "/investigation_and_its_points/{investigation_id}", 
+    "/investigations",
+    response_model=SuccessResponse,
     responses=COMMON_ERROR_RESPONSES,
 )
-async def get_investigation(investigation_id: int) -> dict[str, Any]:
+async def get_investigations(limit: int = 50) -> SuccessResponse:
+    limit = min(max(limit, 1), 200)
+    with PostgreSQLRepository() as repository:
+        investigation_rows = repository.read(
+            _INVESTIGATIONS_TABLE,
+            order_by="investigation_id",
+            limit=None,
+        )
+        investigation_rows = sorted(
+            investigation_rows,
+            key=lambda row: int(row.get("investigation_id") or 0),
+            reverse=True,
+        )[:limit]
+
+        summaries: list[dict[str, Any]] = []
+        for investigation in investigation_rows:
+            investigation_id = investigation["investigation_id"]
+            point_rows = repository.read(
+                _POINTS_TABLE,
+                where="investigation_id = %s",
+                params=(investigation_id,),
+                order_by="point_id",
+                limit=None,
+            )
+            root_point = next(
+                (point for point in point_rows if point.get("point_type") == PointType.ROOT),
+                point_rows[0] if point_rows else None,
+            )
+            summaries.append(
+                {
+                    **investigation,
+                    "root_point_id": root_point.get("point_id") if root_point else None,
+                    "root_question": root_point.get("question", "") if root_point else "",
+                    "root_status": root_point.get("status", "") if root_point else "",
+                    "point_count": len(point_rows),
+                }
+            )
+
+    return SuccessResponse(data={"investigations": summaries})
+
+
+@router.get(
+    "/investigation_and_its_points/{investigation_id}", 
+    response_model=SuccessResponse,
+    responses=COMMON_ERROR_RESPONSES,
+)
+async def get_investigation(investigation_id: int) -> SuccessResponse:
     # Polling endpoint: return the current persisted state only.
     # It never starts or resumes graph work.
     with PostgreSQLRepository() as repository:
@@ -126,10 +173,12 @@ async def get_investigation(investigation_id: int) -> dict[str, Any]:
             limit=None,
         )
 
-    return {
-        "investigation": investigation_rows[0],
-        "points": point_rows,
-    }
+    return SuccessResponse(
+        data={
+            "investigation": investigation_rows[0],
+            "points": point_rows,
+        }
+    )
 
 @router.post(
     "/set_point",
@@ -157,7 +206,11 @@ async def set_point(req: SetPointRequest):
 
         investigation_id = req.investigation_id
         if investigation_id is None:
-            investigation_rows = repository.create(_INVESTIGATIONS_TABLE, returning="*")
+            investigation_rows = repository.create(
+                _INVESTIGATIONS_TABLE,
+                {"investigation_id": _next_id(repository, _INVESTIGATIONS_TABLE, "investigation_id")},
+                returning="*",
+            )
             if not investigation_rows or not isinstance(investigation_rows, list):
                 raise HTTPException(status_code=500, detail="Failed to create investigation.")
             investigation_id = investigation_rows[0]["investigation_id"]
@@ -174,6 +227,7 @@ async def set_point(req: SetPointRequest):
         point_rows = repository.create(
             _POINTS_TABLE,
             {
+                "point_id": _next_id(repository, _POINTS_TABLE, "point_id"),
                 "investigation_id": investigation_id,
                 "point_type": PointType.ROOT,
                 "question": req.question,
@@ -296,6 +350,21 @@ async def route_node(state: AgentState, llm: ArkChatModel) -> dict:
     context = _build_context(current_point, current_investigation)
 
     if current_point.point_type == PointType.ORDER_SEARCH:
+        if current_point.status == PointStatus.PROCESSING:
+            return {
+                "route_decision": InvestigateRouteDecision(
+                    action=InvestigateRouteAction.ORDER_SEARCH_NODE,
+                    instruction=current_point.question,
+                    reason="重新执行订单查询点。",
+                ),
+                "current_point": current_point,
+                "is_thinking": True,
+            }
+        if current_point.status == PointStatus.FAILED:
+            raise HTTPException(
+                status_code=500,
+                detail=current_point.error or "Order search point failed.",
+            )
         # Search points are evidence leaves. After their search has been stored,
         # they should summarize/conclude instead of spawning more work.
         return {
@@ -425,6 +494,7 @@ async def sub_question_node(state: AgentState, llm: ArkChatModel) -> dict:
         child_rows = repository.create(
             _POINTS_TABLE,
             {
+                "point_id": _next_id(repository, _POINTS_TABLE, "point_id"),
                 "investigation_id": current_point.investigation_id,
                 "parent_point_id": current_point.point_id,
                 "point_type": PointType.TRUNK,
@@ -499,7 +569,8 @@ async def order_search_node(state: AgentState, llm: ArkChatModel) -> dict:
     decision = _state_decision(state)
     if decision is None:
         raise HTTPException(status_code=500, detail="Investigation route decision is missing.")
-    if _search_child_count(current_point.point_id) >= _MAX_ORDER_SEARCHES:
+    is_direct_order_search_retry = current_point.point_type == PointType.ORDER_SEARCH
+    if not is_direct_order_search_retry and _search_child_count(current_point.point_id) >= _MAX_ORDER_SEARCHES:
         return {
             "route_decision": _force_conclusion_decision("已达到订单查询次数上限。"),
             "current_point": current_point,
@@ -531,24 +602,28 @@ async def order_search_node(state: AgentState, llm: ArkChatModel) -> dict:
     if search_request is None:
         raise HTTPException(status_code=500, detail="Investigation order search request is empty.")
 
-    with PostgreSQLRepository() as repository:
-        search_point_rows = repository.create(
-            _POINTS_TABLE,
-            {
-                "investigation_id": current_point.investigation_id,
-                "parent_point_id": current_point.point_id,
-                "point_type": PointType.ORDER_SEARCH,
-                "question": search_question,
-                "reason": decision.reason,
-                "status": PointStatus.PROCESSING,
-                "error": "",
-                "raw_data": {},
-            },
-            returning="*",
-        )
-    if not search_point_rows or not isinstance(search_point_rows, list):
-        raise HTTPException(status_code=500, detail="Failed to create order search point.")
-    search_point = PgPoints.model_validate(search_point_rows[0])
+    if is_direct_order_search_retry:
+        search_point = current_point
+    else:
+        with PostgreSQLRepository() as repository:
+            search_point_rows = repository.create(
+                _POINTS_TABLE,
+                {
+                    "point_id": _next_id(repository, _POINTS_TABLE, "point_id"),
+                    "investigation_id": current_point.investigation_id,
+                    "parent_point_id": current_point.point_id,
+                    "point_type": PointType.ORDER_SEARCH,
+                    "question": search_question,
+                    "reason": decision.reason,
+                    "status": PointStatus.PROCESSING,
+                    "error": "",
+                    "raw_data": {},
+                },
+                returning="*",
+            )
+        if not search_point_rows or not isinstance(search_point_rows, list):
+            raise HTTPException(status_code=500, detail="Failed to create order search point.")
+        search_point = PgPoints.model_validate(search_point_rows[0])
 
     payload, result_text, error = await call_jinxi_order_get_api(search_request)
     conclusion = _summarize_order_search(
@@ -580,7 +655,7 @@ async def order_search_node(state: AgentState, llm: ArkChatModel) -> dict:
 
     return {
         "error": error or "",
-        "current_point": _load_point(current_point.point_id),
+        "current_point": _load_point(search_point.point_id if is_direct_order_search_retry else current_point.point_id),
         "is_thinking": True,
     }
 
@@ -592,7 +667,11 @@ def _load_or_create_processing_point(point_id: int | None) -> tuple[PgInvestigat
     # Existing ids are validated and loaded with their investigation row.
     with PostgreSQLRepository() as repository:
         if point_id is None:
-            investigation_rows = repository.create(_INVESTIGATIONS_TABLE, returning="*")
+            investigation_rows = repository.create(
+                _INVESTIGATIONS_TABLE,
+                {"investigation_id": _next_id(repository, _INVESTIGATIONS_TABLE, "investigation_id")},
+                returning="*",
+            )
             if not investigation_rows or not isinstance(investigation_rows, list):
                 raise HTTPException(status_code=500, detail="Failed to create investigation.")
 
@@ -600,6 +679,7 @@ def _load_or_create_processing_point(point_id: int | None) -> tuple[PgInvestigat
             point_rows = repository.create(
                 _POINTS_TABLE,
                 {
+                    "point_id": _next_id(repository, _POINTS_TABLE, "point_id"),
                     "investigation_id": current_investigation.investigation_id,
                     "point_type": PointType.ROOT,
                     "reason": "",
@@ -671,24 +751,36 @@ def _update_point_status(point_id: int, *, status: PointStatus, error: str = "")
         )
 
 
-def _state_point(state: dict[str, Any]) -> PgPoints:
+def _next_id(repository: PostgreSQLRepository, table: str, id_column: str) -> int:
+    rows = repository.read(table, columns=id_column, order_by=id_column, limit=None)
+    ids = [int(row[id_column]) for row in rows if row.get(id_column) is not None]
+    return max(ids, default=0) + 1
+
+
+def _state_value(state: AgentState | dict[str, Any], key: str) -> Any:
+    if isinstance(state, AgentState):
+        return getattr(state, key)
+    return state.get(key)
+
+
+def _state_point(state: AgentState | dict[str, Any]) -> PgPoints:
     # LangGraph may hand back dicts after state merging; normalize to PgPoints.
-    point = state.get("current_point")
+    point = _state_value(state, "current_point")
     if point is None:
         raise HTTPException(status_code=500, detail="Current point is missing.")
     return PgPoints.model_validate(point)
 
 
-def _state_investigation(state: dict[str, Any]) -> PgInvestigations:
-    investigation = state.get("current_investigation")
+def _state_investigation(state: AgentState | dict[str, Any]) -> PgInvestigations:
+    investigation = _state_value(state, "current_investigation")
     if investigation is None:
         raise HTTPException(status_code=500, detail="Current investigation is missing.")
     return PgInvestigations.model_validate(investigation)
 
 
-def _state_decision(state: dict[str, Any]) -> InvestigateRouteDecision | None:
+def _state_decision(state: AgentState | dict[str, Any]) -> InvestigateRouteDecision | None:
     # Normalize route decisions for the same dict/Pydantic state boundary.
-    decision = state.get("route_decision")
+    decision = _state_value(state, "route_decision")
     if decision is None:
         return None
     return InvestigateRouteDecision.model_validate(decision)

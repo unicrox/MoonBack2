@@ -18,6 +18,53 @@ export type ApiResponse<T = unknown> = {
   meta?: ResponseMeta | null;
 };
 
+export type Investigation = {
+  investigation_id: number;
+  investigation_name: string;
+};
+
+export type InvestigationSummary = Investigation & {
+  root_point_id: number | null;
+  root_question: string;
+  root_status: PointStatus | "";
+  point_count: number;
+};
+
+export type PointStatus = "idle" | "processing" | "completed" | "failed";
+
+export type PointType = "root" | "trunk" | "order_search";
+
+export type Point = {
+  point_id: number;
+  point_type: PointType;
+  question: string;
+  raw_data: Record<string, unknown>;
+  conclusion: string;
+  parent_point_id: number | null;
+  investigation_id: number | null;
+  reason: string;
+  status: PointStatus;
+  error: string;
+};
+
+export type InvestigationListData = {
+  investigations: InvestigationSummary[];
+};
+
+export type InvestigationDetailData = {
+  investigation: Investigation;
+  points: Point[];
+};
+
+export type SetPointData = {
+  point: Point;
+};
+
+export type ProcessPointData = {
+  investigation_id: number;
+  point_id: number;
+};
+
 type ApiRequestOptions = Omit<RequestInit, "body"> & {
   body?: BodyInit | Record<string, unknown> | null;
 };
@@ -141,4 +188,54 @@ export async function apiRequest<T = unknown>(
   }
 
   return payload;
+}
+
+export async function getInvestigations(): Promise<InvestigationSummary[]> {
+  const response = await apiRequest<InvestigationListData>("/investigations");
+  return response.data?.investigations ?? [];
+}
+
+export async function getInvestigation(
+  investigationId: number,
+): Promise<InvestigationDetailData> {
+  const response = await apiRequest<InvestigationDetailData>(
+    `/investigation_and_its_points/${investigationId}`,
+  );
+
+  if (!response.data) {
+    throw new ApiError("Investigation response was empty.", 500);
+  }
+
+  return response.data;
+}
+
+export async function setPoint(request: {
+  investigation_id?: number | null;
+  point_id?: number | null;
+  question: string;
+  conclusion: string;
+}): Promise<Point> {
+  const response = await apiRequest<SetPointData>("/set_point", {
+    method: "POST",
+    body: request,
+  });
+
+  if (!response.data?.point) {
+    throw new ApiError("Point response was empty.", 500);
+  }
+
+  return response.data.point;
+}
+
+export async function processPoint(pointId: number | null): Promise<ProcessPointData> {
+  const response = await apiRequest<ProcessPointData>("/process_point_endpoint", {
+    method: "POST",
+    body: { point_id: pointId },
+  });
+
+  if (!response.data) {
+    throw new ApiError("Process response was empty.", 500);
+  }
+
+  return response.data;
 }
