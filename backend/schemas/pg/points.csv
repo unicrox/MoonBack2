@@ -1,6 +1,11 @@
 column_name,data_type,is_nullable,column_default,is_primary_key
 point_id,bigint,NO,,YES
-point_type,text,NO,,NO
-assumption,text,NO,''::text,NO
+point_type,text,NO,'trunk'::text,NO
+question,text,NO,''::text,NO
 raw_data,jsonb,NO,'{}'::jsonb,NO
 conclusion,text,NO,''::text,NO
+parent_point_id,bigint,YES,,NO
+investigation_id,bigint,YES,,NO
+status,text,NO,'idle'::text,NO
+error,text,NO,''::text,NO
+reason,text,NO,''::text,NO

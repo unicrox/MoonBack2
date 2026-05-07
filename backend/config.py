@@ -1,7 +1,7 @@
 # Basic
 from pathlib import Path
 
-from backend import secrets
+from backend import app_secrets
 
 
 BACKEND_DIR = Path(__file__).resolve().parent
@@ -37,4 +37,4 @@ WECHAT_RAG_FINAL_EVIDENCE_LIMIT = 200
 WECHAT_RAG_USEFUL_EVIDENCE_SCAN_BATCH_SIZE = 20
 
 
-JINXI_SERVER_TMP_TOKEN = secrets.JINXI_SERVER_TMP_TOKEN
+JINXI_SERVER_TMP_TOKEN = app_secrets.JINXI_SERVER_TMP_TOKEN

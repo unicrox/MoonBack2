@@ -6,6 +6,7 @@ from typing import Any, Iterable, Mapping
 
 import config
 import psycopg2
+from psycopg2.extras import Json
 
 
 _IDENTIFIER_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
@@ -109,7 +110,7 @@ class PostgreSQLRepository:
             columns = [self._quote_identifier(column) for column in data]
             placeholders = ", ".join(["%s"] * len(data))
             query = f"INSERT INTO {table_name} ({', '.join(columns)}) VALUES ({placeholders})"
-            params = tuple(data.values())
+            params = tuple(self._adapt_value(value) for value in data.values())
         else:
             query = f"INSERT INTO {table_name} DEFAULT VALUES"
             params = None
@@ -162,7 +163,7 @@ class PostgreSQLRepository:
 
         assignments = ", ".join(f"{self._quote_identifier(column)} = %s" for column in data)
         query = f"UPDATE {self._quote_identifier(table)} SET {assignments} WHERE {where}"
-        query_params = tuple(data.values()) + tuple(params or ())
+        query_params = tuple(self._adapt_value(value) for value in data.values()) + tuple(params or ())
 
         if returning:
             query += f" RETURNING {self._columns(returning)}"
@@ -217,3 +218,9 @@ class PostgreSQLRepository:
         if not _IDENTIFIER_PATTERN.match(identifier):
             raise PostgreSQLRepositoryError(f"Invalid SQL identifier: {identifier}")
         return f'"{identifier}"'
+
+    @staticmethod
+    def _adapt_value(value: Any) -> Any:
+        if isinstance(value, (dict, list)):
+            return Json(value)
+        return value

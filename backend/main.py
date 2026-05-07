@@ -20,6 +20,7 @@ from helpers.response_helper import (
     SERVER_ERROR_RESPONSE,
 )
 from api.meta import router as meta_router
+from api.investigate import router as investigate_router
 from schemas.response_schemas import ErrorResponse, ResponseCode, SuccessResponse
 
 
@@ -55,6 +56,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 app.include_router(meta_router)
+app.include_router(investigate_router)
 
 
 @app.middleware("http")

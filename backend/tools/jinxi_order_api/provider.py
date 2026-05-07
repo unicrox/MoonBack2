@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import asyncio
 from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError, URLError
@@ -93,12 +94,28 @@ class JinxiOrderGetRequest(BaseModel):
         return payload
 
 
-def call_jinxi_order_get_api(
+async def call_jinxi_order_get_api(
     request: JinxiOrderGetRequest,
     *,
     url: str = JINXI_ORDER_GET_URL,
     token: str | None = None,
     timeout: float = 30.0,
+) -> tuple[dict[str, Any], str, str | None]:
+    return await asyncio.to_thread(
+        _call_jinxi_order_get_api_sync,
+        request,
+        url=url,
+        token=token,
+        timeout=timeout,
+    )
+
+
+def _call_jinxi_order_get_api_sync(
+    request: JinxiOrderGetRequest,
+    *,
+    url: str,
+    token: str | None,
+    timeout: float,
 ) -> tuple[dict[str, Any], str, str | None]:
     payload = request.to_payload()
     body = json.dumps(payload, ensure_ascii=False).encode("utf-8")

@@ -19,9 +19,14 @@ class PgInvestigations(BaseModel):
 class PgPoints(BaseModel):
     point_id: int = Field(description="Primary key.")
     point_type: str
-    assumption: str = Field(default="")
+    question: str = Field(default="")
     raw_data: dict[str, Any] = Field(default_factory=dict)
     conclusion: str = Field(default="")
+    parent_point_id: int | None = Field(default=None)
+    investigation_id: int | None = Field(default=None)
+    reason: str = Field(default="")
+    status: str = Field(default="idle")
+    error: str = Field(default="")
 
 
 __all__ = [
