@@ -11,9 +11,11 @@ import {
   type NodeProps,
 } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
-import { Button, Card, Chip, Spinner, TextArea } from "@heroui/react";
+import { AlertDialog, Button, Card, Chip, Spinner, TextArea } from "@heroui/react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
+  deleteChildPoints,
+  deleteInvestigation,
   getInvestigation,
   getInvestigations,
   processPoint,
@@ -25,7 +27,6 @@ import {
 } from "../lib/api";
 
 const PANEL_WIDTH = 320;
-const PANEL_HEIGHT = 520;
 const PANEL_MARGIN = 16;
 const DRAFT_NODE_ID = "draft-root";
 const NODE_HORIZONTAL_GAP = 460;
@@ -51,6 +52,14 @@ type PanelPosition = {
 };
 
 type NodePositions = Record<string, { x: number; y: number }>;
+
+function investigationLabel(investigation: InvestigationSummary) {
+  return (
+    investigation.root_question ||
+    investigation.investigation_name ||
+    `Investigation ${investigation.investigation_id}`
+  );
+}
 
 function statusColor(status: PointStatus | "draft" | "") {
   if (status === "processing") {
@@ -86,11 +95,10 @@ function pointTitle(point: Point | DraftPoint, isDraft: boolean) {
 
 function clampPanelPosition(position: PanelPosition): PanelPosition {
   const maxX = Math.max(PANEL_MARGIN, window.innerWidth - PANEL_WIDTH - PANEL_MARGIN);
-  const maxY = Math.max(PANEL_MARGIN, window.innerHeight - PANEL_HEIGHT - PANEL_MARGIN);
 
   return {
     x: Math.min(Math.max(PANEL_MARGIN, position.x), maxX),
-    y: Math.min(Math.max(PANEL_MARGIN, position.y), maxY),
+    y: 0,
   };
 }
 
@@ -109,16 +117,18 @@ function InvestigationPointNode({ data }: NodeProps<Node<InvestigationNodeData>>
     <Card className="w-[360px] border border-default-200 bg-background text-left shadow-lg">
       <Handle type="target" position={Position.Top} />
       <Card.Header>
-        <div className="flex w-full items-start justify-between gap-3">
-          <div>
-            <Card.Description>{pointTitle(point, isDraft)}</Card.Description>
-            <Card.Title className="text-base">
-              {persistedPoint ? `Point ${persistedPoint.point_id}` : "Draft point"}
-            </Card.Title>
+        <div className="w-full">
+          <div className="flex w-full items-center justify-between gap-3">
+            <Chip color={isDraft ? "default" : "accent"} size="sm" variant="primary">
+              {pointTitle(point, isDraft)}
+            </Chip>
+            <Chip color={statusColor(status)} size="sm" variant="soft">
+              {statusLabel(status)}
+            </Chip>
           </div>
-          <Chip color={statusColor(status)} size="sm" variant="soft">
-            {statusLabel(status)}
-          </Chip>
+          {/* <p className="mt-2 text-xs text-default-500">
+            {persistedPoint ? `Point #${persistedPoint.point_id}` : "Draft point"}
+          </p> */}
         </div>
       </Card.Header>
       <Card.Content className="flex flex-col gap-3">
@@ -190,7 +200,11 @@ function InvestigationPointNode({ data }: NodeProps<Node<InvestigationNodeData>>
             type="button"
             variant="primary"
           >
-            {isSubmitting ? "Processing" : status === "failed" ? "Retry" : "Process"}
+            {isSubmitting
+              ? "Processing"
+              : status === "failed" || status === "completed"
+                ? "Retry"
+                : "Process"}
           </Button>
         </Card.Footer>
       ) : null}
@@ -246,11 +260,12 @@ export default function InvestigatePage() {
   const [activeInvestigationId, setActiveInvestigationId] = useState<number | null>(null);
   const [detail, setDetail] = useState<InvestigationDetailData | null>(null);
   const [draftPoint, setDraftPoint] = useState<DraftPoint | null>({ question: "", status: "draft" });
-  const [panelPosition, setPanelPosition] = useState<PanelPosition>({ x: 16, y: 16 });
+  const [panelPosition, setPanelPosition] = useState<PanelPosition>({ x: 16, y: 0 });
   const [nodePositions, setNodePositions] = useState<NodePositions>({});
   const [isLoadingList, setIsLoadingList] = useState(false);
   const [isLoadingDetail, setIsLoadingDetail] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [deleteTarget, setDeleteTarget] = useState<InvestigationSummary | null>(null);
   const [errorMessage, setErrorMessage] = useState("");
   const dragOffsetRef = useRef<PanelPosition | null>(null);
 
@@ -285,13 +300,14 @@ export default function InvestigatePage() {
       }
     }
   }, []);
+  const hasProcessingPoint = detail?.points.some((point) => point.status === "processing") ?? false;
 
   useEffect(() => {
     void refreshInvestigations();
   }, [refreshInvestigations]);
 
   useEffect(() => {
-    if (activeInvestigationId === null) {
+    if (activeInvestigationId === null || !hasProcessingPoint) {
       return undefined;
     }
 
@@ -301,7 +317,7 @@ export default function InvestigatePage() {
     }, 5000);
 
     return () => window.clearInterval(intervalId);
-  }, [activeInvestigationId, loadInvestigation, refreshInvestigations]);
+  }, [activeInvestigationId, hasProcessingPoint, loadInvestigation, refreshInvestigations]);
 
   useEffect(() => {
     function handlePointerMove(event: PointerEvent) {
@@ -360,6 +376,33 @@ export default function InvestigatePage() {
     [loadInvestigation],
   );
 
+  const handleDeleteInvestigation = useCallback(
+    async () => {
+      if (!deleteTarget) {
+        return;
+      }
+
+      setIsLoadingList(true);
+      setErrorMessage("");
+
+      try {
+        await deleteInvestigation(deleteTarget.investigation_id);
+        if (deleteTarget.investigation_id === activeInvestigationId) {
+          setActiveInvestigationId(null);
+          setDetail(null);
+          setDraftPoint({ question: "", status: "draft" });
+        }
+        setDeleteTarget(null);
+        await refreshInvestigations();
+      } catch (error) {
+        setErrorMessage(error instanceof Error ? error.message : "Failed to delete investigation.");
+      } finally {
+        setIsLoadingList(false);
+      }
+    },
+    [activeInvestigationId, deleteTarget, refreshInvestigations],
+  );
+
   const handleQuestionChange = useCallback((pointId: number | null, question: string) => {
     if (pointId === null) {
       setDraftPoint((current) => (current ? { ...current, question } : current));
@@ -401,6 +444,9 @@ export default function InvestigatePage() {
           question: draftQuestion,
           conclusion: "",
         });
+        if (pointId !== null) {
+          await deleteChildPoints(point.point_id);
+        }
         const processResult = await processPoint(point.point_id);
         const investigationId = processResult.investigation_id ?? point.investigation_id;
 
@@ -482,8 +528,7 @@ export default function InvestigatePage() {
       data: {
         point,
         isDraft: false,
-        canProcess:
-          point.status === "failed" || (point.point_type === "root" && point.status === "idle"),
+        canProcess: point.status !== "processing",
         isSubmitting,
         onQuestionChange: handleQuestionChange,
         onProcess: handleProcess,
@@ -534,7 +579,7 @@ export default function InvestigatePage() {
       </ReactFlow>
 
       <Card
-        className="absolute z-20 flex h-[520px] w-[320px] flex-col border border-default-200 bg-background/95 shadow-xl backdrop-blur"
+        className="absolute z-20 flex h-dvh w-[320px] flex-col border border-default-200 bg-background/95 shadow-xl backdrop-blur"
         style={{ left: panelPosition.x, top: panelPosition.y }}
       >
         <Card.Header
@@ -569,44 +614,102 @@ export default function InvestigatePage() {
 
             {investigations.map((investigation) => {
               const isSelected = investigation.investigation_id === activeInvestigationId;
-              const label =
-                investigation.root_question ||
-                investigation.investigation_name ||
-                `Investigation ${investigation.investigation_id}`;
+              const label = investigationLabel(investigation);
 
               return (
-                <button
+                <div
                   className={`mb-2 w-full rounded-lg border p-3 text-left transition ${
                     isSelected
                       ? "border-primary bg-primary-50 text-primary"
                       : "border-transparent bg-default-50 text-foreground hover:border-default-200 hover:bg-default-100"
                   }`}
                   key={investigation.investigation_id}
-                  onClick={() => handleSelectInvestigation(investigation.investigation_id)}
-                  type="button"
                 >
-                  <div className="mb-2 flex items-center justify-between gap-2">
-                    <span className="text-xs font-medium text-default-500">
-                      #{investigation.investigation_id}
-                    </span>
-                    <Chip
-                      color={statusColor(investigation.root_status)}
+                  <button
+                    className="block w-full text-left"
+                    onClick={() => handleSelectInvestigation(investigation.investigation_id)}
+                    type="button"
+                  >
+                    <div className="mb-2 flex items-center justify-between gap-2">
+                      <span className="text-xs font-medium text-default-500">
+                        #{investigation.investigation_id}
+                      </span>
+                      <Chip
+                        color={statusColor(investigation.root_status)}
+                        size="sm"
+                        variant="soft"
+                      >
+                        {statusLabel(investigation.root_status)}
+                      </Chip>
+                    </div>
+                    <p className="line-clamp-2 text-sm font-medium">{label}</p>
+                    <p className="mt-2 text-xs text-default-500">
+                      {investigation.point_count} point{investigation.point_count === 1 ? "" : "s"}
+                    </p>
+                  </button>
+                  <div className="mt-3 flex justify-end">
+                    <Button
+                      isDisabled={isLoadingList}
+                      onPress={() => setDeleteTarget(investigation)}
                       size="sm"
-                      variant="soft"
+                      type="button"
+                      variant="danger-soft"
                     >
-                      {statusLabel(investigation.root_status)}
-                    </Chip>
+                      Delete
+                    </Button>
                   </div>
-                  <p className="line-clamp-2 text-sm font-medium">{label}</p>
-                  <p className="mt-2 text-xs text-default-500">
-                    {investigation.point_count} point{investigation.point_count === 1 ? "" : "s"}
-                  </p>
-                </button>
+                </div>
               );
             })}
           </div>
         </Card.Content>
       </Card>
+
+      {deleteTarget ? (
+        <AlertDialog
+          isOpen
+          onOpenChange={(isOpen) => {
+            if (!isOpen && !isLoadingList) {
+              setDeleteTarget(null);
+            }
+          }}
+        >
+          <AlertDialog.Backdrop>
+            <AlertDialog.Container placement="center" size="md">
+              <AlertDialog.Dialog>
+                <AlertDialog.Header>
+                  <AlertDialog.Icon status="danger" />
+                  <AlertDialog.Heading>Delete investigation</AlertDialog.Heading>
+                </AlertDialog.Header>
+                <AlertDialog.Body>
+                  <p className="text-sm text-default-600">
+                    Delete "{investigationLabel(deleteTarget)}" and all of its points? This cannot
+                    be undone.
+                  </p>
+                </AlertDialog.Body>
+                <AlertDialog.Footer>
+                  <Button
+                    isDisabled={isLoadingList}
+                    onPress={() => setDeleteTarget(null)}
+                    type="button"
+                    variant="secondary"
+                  >
+                    Cancel
+                  </Button>
+                  <Button
+                    isDisabled={isLoadingList}
+                    onPress={() => void handleDeleteInvestigation()}
+                    type="button"
+                    variant="danger"
+                  >
+                    {isLoadingList ? "Deleting" : "Delete"}
+                  </Button>
+                </AlertDialog.Footer>
+              </AlertDialog.Dialog>
+            </AlertDialog.Container>
+          </AlertDialog.Backdrop>
+        </AlertDialog>
+      ) : null}
 
       <div className="pointer-events-none absolute right-4 top-4 z-10 flex items-center gap-2 rounded-lg border border-default-200 bg-background/90 px-3 py-2 text-sm shadow-sm backdrop-blur">
         {isLoadingDetail ? <Spinner size="sm" /> : null}

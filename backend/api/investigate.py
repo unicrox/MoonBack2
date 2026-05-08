@@ -244,6 +244,106 @@ async def set_point(req: SetPointRequest):
 
     return SuccessResponse(data={"point": point_rows[0]})
 
+@router.delete(
+    "/delete_child_points/{point_id}",
+    response_model=SuccessResponse,
+    responses=COMMON_ERROR_RESPONSES,
+)
+async def delete_child_points(point_id: int) -> SuccessResponse:
+    # Delete every descendant of the selected point while keeping the selected
+    # point itself. This lets callers clear stale investigation branches before
+    # retrying a point.
+    with PostgreSQLRepository() as repository:
+        parent_rows = repository.read(
+            _POINTS_TABLE,
+            where="point_id = %s",
+            params=(point_id,),
+            limit=1,
+        )
+        if not parent_rows:
+            raise HTTPException(status_code=404, detail="Point not found.")
+
+        investigation_id = parent_rows[0].get("investigation_id")
+        if investigation_id is None:
+            point_rows = repository.read(
+                _POINTS_TABLE,
+                order_by="point_id",
+                limit=None,
+            )
+        else:
+            point_rows = repository.read(
+                _POINTS_TABLE,
+                where="investigation_id = %s",
+                params=(investigation_id,),
+                order_by="point_id",
+                limit=None,
+            )
+        descendant_ids = _descendant_point_ids(point_id, point_rows)
+        if not descendant_ids:
+            return SuccessResponse(
+                message="No child points to delete.",
+                data={
+                    "point_id": point_id,
+                    "deleted_count": 0,
+                    "deleted_point_ids": [],
+                },
+            )
+
+        deleted_rows = repository.fetch_all(
+            f'DELETE FROM "{_POINTS_TABLE}" WHERE point_id = ANY(%s) RETURNING point_id',
+            (descendant_ids,),
+        )
+
+    deleted_point_ids = sorted(int(row["point_id"]) for row in deleted_rows)
+    return SuccessResponse(
+        message="Child points deleted.",
+        data={
+            "point_id": point_id,
+            "deleted_count": len(deleted_point_ids),
+            "deleted_point_ids": deleted_point_ids,
+        },
+    )
+
+@router.delete(
+    "/delete_investigation_and_child_points/{investigation_id}",
+    response_model=SuccessResponse,
+    responses=COMMON_ERROR_RESPONSES,
+)
+async def delete_investigation_and_child_points(investigation_id: int) -> SuccessResponse:
+    with PostgreSQLRepository() as repository:
+        investigation_rows = repository.read(
+            _INVESTIGATIONS_TABLE,
+            where="investigation_id = %s",
+            params=(investigation_id,),
+            limit=1,
+        )
+        if not investigation_rows:
+            raise HTTPException(status_code=404, detail="Investigation not found.")
+
+        deleted_point_rows = repository.fetch_all(
+            f'DELETE FROM "{_POINTS_TABLE}" WHERE investigation_id = %s RETURNING point_id',
+            (investigation_id,),
+        )
+        deleted_investigation_rows = repository.delete(
+            _INVESTIGATIONS_TABLE,
+            where="investigation_id = %s",
+            params=(investigation_id,),
+            returning="investigation_id",
+        )
+
+    if not deleted_investigation_rows or not isinstance(deleted_investigation_rows, list):
+        raise HTTPException(status_code=500, detail="Failed to delete investigation.")
+
+    deleted_point_ids = sorted(int(row["point_id"]) for row in deleted_point_rows)
+    return SuccessResponse(
+        message="Investigation deleted.",
+        data={
+            "investigation_id": investigation_id,
+            "deleted_point_count": len(deleted_point_ids),
+            "deleted_point_ids": deleted_point_ids,
+        },
+    )
+
 @router.post(
     "/process_point_endpoint",
     response_model=SuccessResponse,
@@ -343,6 +443,7 @@ def leave_graph():
 
 
 async def route_node(state: AgentState, llm: ArkChatModel) -> dict:
+    print(f"-- route_node -- point: {state.current_point.point_id if state.current_point else 'N/A'}, question: {state.question}")
     # Decide the next single step for the current point, using persisted child
     # points as memory from previous loop iterations.
     current_point = _load_point(_state_point(state).point_id)
@@ -450,6 +551,7 @@ async def route_node(state: AgentState, llm: ArkChatModel) -> dict:
 
 
 async def sub_question_node(state: AgentState, llm: ArkChatModel) -> dict:
+    print(f"-- sub_question_node -- point: {state.current_point.point_id if state.current_point else 'N/A'}, question: {state.question}")
     # Root-only node: generate exactly one new child question, process it to
     # completion, then return control to the root route loop.
     current_point = _load_point(_state_point(state).point_id)
@@ -515,6 +617,7 @@ async def sub_question_node(state: AgentState, llm: ArkChatModel) -> dict:
 
 
 async def conclusion_node(state: AgentState, llm: ArkChatModel) -> dict:
+    print(f"-- conclusion_node -- point: {state.current_point.point_id if state.current_point else 'N/A'}, question: {state.question}")
     # Final node for a point. The point remains visible to polling clients as
     # completed after its conclusion is persisted.
     current_point = _load_point(_state_point(state).point_id)
@@ -562,6 +665,7 @@ async def conclusion_node(state: AgentState, llm: ArkChatModel) -> dict:
 
 
 async def order_search_node(state: AgentState, llm: ArkChatModel) -> dict:
+    print(f"-- order_search_node -- point: {state.current_point.point_id if state.current_point else 'N/A'}, question: {state.question}")
     # Create one search/evidence child point for this route decision, call the
     # order API, store the result, then loop back so the parent can decide again.
     current_point = _load_point(_state_point(state).point_id)
@@ -638,7 +742,7 @@ async def order_search_node(state: AgentState, llm: ArkChatModel) -> dict:
     try:
         result_json = json.loads(result_text)
     except json.JSONDecodeError:
-        result_json = result_text
+        result_json = {"text": result_text}
 
     with PostgreSQLRepository() as repository:
         repository.update(
@@ -807,6 +911,25 @@ def _load_direct_children(point_id: int) -> list[PgPoints]:
             limit=None,
         )
     return [PgPoints.model_validate(row) for row in rows]
+
+
+def _descendant_point_ids(point_id: int, point_rows: list[dict[str, Any]]) -> list[int]:
+    children_by_parent: dict[int, list[int]] = {}
+    for row in point_rows:
+        child_id = row.get("point_id")
+        parent_id = row.get("parent_point_id")
+        if child_id is None or parent_id is None:
+            continue
+        children_by_parent.setdefault(int(parent_id), []).append(int(child_id))
+
+    descendant_ids: list[int] = []
+    pending = list(children_by_parent.get(point_id, []))
+    while pending:
+        child_id = pending.pop()
+        descendant_ids.append(child_id)
+        pending.extend(children_by_parent.get(child_id, []))
+
+    return descendant_ids
 
 
 def _search_child_count(point_id: int) -> int:

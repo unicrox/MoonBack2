@@ -65,6 +65,18 @@ export type ProcessPointData = {
   point_id: number;
 };
 
+export type DeleteChildPointsData = {
+  point_id: number;
+  deleted_count: number;
+  deleted_point_ids: number[];
+};
+
+export type DeleteInvestigationData = {
+  investigation_id: number;
+  deleted_point_count: number;
+  deleted_point_ids: number[];
+};
+
 type ApiRequestOptions = Omit<RequestInit, "body"> & {
   body?: BodyInit | Record<string, unknown> | null;
 };
@@ -235,6 +247,35 @@ export async function processPoint(pointId: number | null): Promise<ProcessPoint
 
   if (!response.data) {
     throw new ApiError("Process response was empty.", 500);
+  }
+
+  return response.data;
+}
+
+export async function deleteChildPoints(pointId: number): Promise<DeleteChildPointsData> {
+  const response = await apiRequest<DeleteChildPointsData>(`/delete_child_points/${pointId}`, {
+    method: "DELETE",
+  });
+
+  if (!response.data) {
+    throw new ApiError("Delete child points response was empty.", 500);
+  }
+
+  return response.data;
+}
+
+export async function deleteInvestigation(
+  investigationId: number,
+): Promise<DeleteInvestigationData> {
+  const response = await apiRequest<DeleteInvestigationData>(
+    `/delete_investigation_and_child_points/${investigationId}`,
+    {
+      method: "DELETE",
+    },
+  );
+
+  if (!response.data) {
+    throw new ApiError("Delete investigation response was empty.", 500);
   }
 
   return response.data;

@@ -1,4 +1,5 @@
 fastapi
+certifi
 langchain
 langgraph
 psycopg2-binary

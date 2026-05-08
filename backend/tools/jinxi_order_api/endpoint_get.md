@@ -75,20 +75,46 @@
 ```json
 {
   "model_code": "super_function",
-  "action_code": "get_order",
   "current": 1,
   "pageSize": 50,
   "with_total_count": true,
   "without_meta": true,
   "field_filters": {
-    "task_type": { "in": ["WILLING", "MAIN"] },
+    "task_type": { "equal": "MAIN" },
     "is_sample": { "not": true },
-    "sales_status": { "equal": "跟进中" }
+    "sales_status": { "equal": "成交" }
   },
   "field_sorts": { "created_at": "desc" },
   "aggregate_id_field_code": "sales_status"
 }
 ```
+
+完整请求中可能还会携带前端分页展示字段或业务动作字段，例如：
+
+```json
+{
+  "model_code": "super_function",
+  "field_sorts": { "created_at": "desc" },
+  "field_filters": {
+    "task_type": { "equal": "MAIN" },
+    "is_sample": { "not": true },
+    "sales_status": { "equal": "成交" }
+  },
+  "current": 1,
+  "pageSize": 50,
+  "total": 269,
+  "showTotal": true,
+  "showJumper": true,
+  "showPageSize": true,
+  "with_total_count": true,
+  "action_code": "get_order",
+  "aggregate_id_field_code": "sales_status",
+  "without_meta": true,
+  "project_code": "lighting-designer"
+}
+```
+
+Agent 生成结构化请求时重点保留查询语义字段：`field_filters`、`field_sorts`、`current`、`pageSize`、`with_total_count`、`aggregate_id_field_code`、`without_meta`。其中 `aggregate_id_field_code` 是触发分组统计的关键字段。
 
 ## 返回结构
 

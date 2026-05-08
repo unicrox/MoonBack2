@@ -1,1 +1,1 @@
-JINXI_SERVER_TMP_TOKEN = ""
+JINXI_SERVER_TMP_TOKEN = "lighting-designer-token-e7hE4JgLjUta8ax7JZwFKjFYtfnk83nPD8KjZn27LHKqZOv9sroezU1wsqKr5ihG"
