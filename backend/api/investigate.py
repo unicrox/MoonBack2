@@ -4,6 +4,7 @@ from functools import lru_cache, partial
 from typing import Any
 import asyncio
 import json
+import re
 from fastapi import APIRouter, HTTPException
 from helpers.response_helper import COMMON_ERROR_RESPONSES
 from schemas.response_schemas import SuccessResponse
@@ -505,10 +506,13 @@ async def route_node(state: AgentState, llm: ArkChatModel) -> dict:
         f"可选动作：\n{action_options}\n\n"
         "判断规则：\n"
         "- 每次选择 sub_question_node 只代表生成一个新的子问题，不要一次性生成多个。\n"
-        "- 如果需要订单列表、订单详情、客户购买记录、交付状态、金额、时间、商品、服务记录等业务数据来验证或回答，选择 order_search_node。\n"
+        "- 根节点如果包含对比、多个年份、多个指标、多个条件或需要先拆分的问题，优先选择 sub_question_node，而不是直接查询订单。\n"
+        "- 根节点只有在问题已经是单一、明确、可直接查询的原子问题时，才选择 order_search_node。\n"
+        "- 非根节点如果需要订单列表、订单详情、客户购买记录、交付状态、金额、时间、商品、服务记录等业务数据来验证或回答，选择 order_search_node。\n"
         "- 如果已有直接子点结论、订单查询结果或当前问题信息足够，选择 conclusion_node。\n"
         "- 判断是否继续调查时，必须参考已有“直接子点”，避免重复生成已经调查过的子问题或重复查询。\n"
         "- 不要编造订单信息；无法确定但可能依赖订单事实时，优先选择 order_search_node。\n"
+        "- 对于类似“比较 2026 和 2025 的订单数量和收入金额”的根节点，应依次拆分出“2026 订单数量”“2025 订单数量”“2026 收入金额”“2025 收入金额”等直接子问题；这些子问题再各自查询订单。\n"
         "- instruction 必须给出下一步代理应该执行的具体任务，且要和 action 匹配。\n"
         "- 当 action 为 sub_question_node 时，instruction 应说明下一个子问题应该补足哪一类调查缺口。\n"
         "- 当 action 为 order_search_node 时，instruction 应说明要查询什么订单数据，例如查询今年订单、统计订单数量、检查客户购买记录等。\n"
@@ -533,6 +537,21 @@ async def route_node(state: AgentState, llm: ArkChatModel) -> dict:
 
     if decision is None or not decision.instruction.strip() or not decision.reason.strip():
         raise HTTPException(status_code=500, detail="Investigation route decision is empty.")
+
+    if (
+        current_point.point_type == PointType.ROOT
+        and decision.action == InvestigateRouteAction.ORDER_SEARCH_NODE
+        and _question_child_count(current_point.point_id) == 0
+        and _looks_like_compound_root_question(current_point.question)
+    ):
+        decision = InvestigateRouteDecision(
+            action=InvestigateRouteAction.SUB_QUESTION_NODE,
+            instruction=(
+                "当前根问题包含对比或多个指标，先生成一个直接子问题。"
+                "优先补足一个可独立查询的指标，例如某一年订单数量或某一年收入金额。"
+            ),
+            reason="根问题不是单一原子查询，需要先拆分子问题。",
+        )
 
     if current_point.point_type != PointType.ROOT and decision.action == InvestigateRouteAction.SUB_QUESTION_NODE:
         # Enforce root-only breakdown in code, not only in the prompt.
@@ -572,6 +591,8 @@ async def sub_question_node(state: AgentState, llm: ArkChatModel) -> dict:
         "- 子问题必须服务于回答根节点问题。\n"
         "- 必须参考已有“直接子点”，避免重复已经调查过的方向。\n"
         "- 子问题应该具体、可调查、可通过后续订单数据或已有信息回答。\n"
+        "- 子问题应该是单一原子问题，一次只包含一个年份、一个指标或一个条件。\n"
+        "- 如果根问题要求比较多个年份和多个指标，应按缺口逐个生成，例如先生成“2026 年订单数量是多少？”，再生成“2025 年订单数量是多少？”，再生成收入金额相关子问题。\n"
         "- 只输出子问题文本本身，不要输出 JSON、标题、编号或解释。"
     )
     user_message = (
@@ -938,6 +959,42 @@ def _search_child_count(point_id: int) -> int:
 
 def _question_child_count(point_id: int) -> int:
     return sum(1 for child in _load_direct_children(point_id) if child.point_type != PointType.ORDER_SEARCH)
+
+
+def _looks_like_compound_root_question(question: str) -> bool:
+    normalized = question.lower()
+    compound_markers = (
+        " and ",
+        " or ",
+        "compare",
+        "better than",
+        " vs ",
+        " versus ",
+        "以及",
+        "和",
+        "与",
+        "对比",
+        "比较",
+        "是否更好",
+        "多个",
+    )
+    metric_markers = (
+        "count",
+        "amount",
+        "income",
+        "sales",
+        "订单数量",
+        "数量",
+        "金额",
+        "收入",
+        "销售",
+    )
+    year_count = len(set(re.findall(r"\b20\d{2}\b", normalized)))
+    return (
+        year_count >= 2
+        or sum(marker in normalized for marker in compound_markers) >= 1
+        and sum(marker in normalized for marker in metric_markers) >= 2
+    )
 
 
 def _point_summary(point: PgPoints) -> dict[str, Any]:
